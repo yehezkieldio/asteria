@@ -25,17 +25,9 @@ pub trait LoadableConfig: Sized + Default + for<'de> Deserialize<'de> {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ServerConfig {
     pub network: NetworkConfig,
-}
-
-impl Default for ServerConfig {
-    fn default() -> Self {
-        Self {
-            network: NetworkConfig::default(),
-        }
-    }
 }
 
 impl LoadableConfig for ServerConfig {
@@ -44,17 +36,9 @@ impl LoadableConfig for ServerConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ClientConfig {
     pub network: NetworkConfig,
-}
-
-impl Default for ClientConfig {
-    fn default() -> Self {
-        Self {
-            network: NetworkConfig::default(),
-        }
-    }
 }
 
 impl LoadableConfig for ClientConfig {
