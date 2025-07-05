@@ -12,3 +12,4 @@ asteria-core = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+enigo = { workspace = true }
