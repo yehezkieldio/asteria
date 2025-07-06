@@ -52,6 +52,7 @@ jobs:
 
       - name: Determine Package to Build
         id: pkg
+        shell: bash
         run: |
           if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ github.event.inputs.package }}" != "all" ]]; then
             echo "selected_package=${{ github.event.inputs.package }}" >> $GITHUB_OUTPUT
@@ -66,6 +67,7 @@ jobs:
           fi
 
       - name: Build Release
+        shell: bash
         run: |
           mkdir -p release
           pkg="${{ steps.pkg.outputs.selected_package }}"
