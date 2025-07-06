@@ -104,8 +104,8 @@ jobs:
             build_pkg_name="${{ matrix.package_constraint }}"
             cargo build --release --package "$build_pkg_name" --target ${{ matrix.target }}
 
-            # Extract binary name more reliably
-            bin_name="${build_pkg_name#asteria-}"
+            # Use the full package name as the binary name
+            bin_name="${build_pkg_name}"
 
             # Use shorter platform identifiers
             platform_name=""
