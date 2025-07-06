@@ -11,14 +11,14 @@ async fn main() -> Result<()> {
 
     match matches.subcommand() {
         Some(("start", _)) => {
-            info!("Starting Asteria server...");
+            info!("Starting Asteria client...");
         }
         Some(("ping", sub_m)) => {
             let host = sub_m.get_one::<String>("host").cloned();
             if let Some(host) = host {
                 info!("Pinging host: {}", host);
             } else {
-                info!("Pinging using discovery...");
+                info!("Pinging using configured host");
             }
         }
         _ => {
@@ -30,18 +30,13 @@ async fn main() -> Result<()> {
 }
 
 fn build_cli() -> Command {
-    Command::new("asteria-server")
+    Command::new("asteria-client")
         .version(env!("CARGO_PKG_VERSION"))
-        .about("Asteria server application")
-        .subcommand(Command::new("start").about("Start the Asteria server"))
+        .about("Asteria client application")
+        .subcommand(Command::new("start").about("Start the Asteria client"))
         .subcommand(
             Command::new("ping")
                 .about("Send a ping to test connectivity")
-                .arg(
-                    Arg::new("host")
-                        .help("Specific host to ping (optional, will use discovery)")
-                        .long("host")
-                        .value_name("HOST"),
-                ),
+                .arg(Arg::new("host").help("Specific host to ping").index(1)),
         )
 }
