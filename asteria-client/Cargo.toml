@@ -12,4 +12,6 @@ asteria-core = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+libc = { workspace = true }
 input = { workspace = true }
+bincode = { workspace = true }

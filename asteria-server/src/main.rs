@@ -3,6 +3,11 @@ use asteria_core::init_logging;
 use clap::{Arg, ArgMatches, Command};
 use tracing::{error, info};
 
+mod input_simulator;
+mod server;
+
+use server::InputServer;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let matches: ArgMatches = build_cli().get_matches();
@@ -12,14 +17,13 @@ async fn main() -> Result<()> {
     match matches.subcommand() {
         Some(("start", _)) => {
             info!("Starting Asteria server...");
+            let server = InputServer::new()?;
+            server.start().await?;
         }
         Some(("ping", sub_m)) => {
             let host = sub_m.get_one::<String>("host").cloned();
-            if let Some(host) = host {
-                info!("Pinging host: {}", host);
-            } else {
-                info!("Pinging using configured host");
-            }
+            let server = InputServer::new()?;
+            server.ping(host).await?;
         }
         _ => {
             error!("Invalid command. Use --help for usage information.");

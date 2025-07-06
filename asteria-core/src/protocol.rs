@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InputEvent {
@@ -8,8 +9,18 @@ pub struct InputEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum InputEventType {
+    KeyPress { key_code: u16 },
+    KeyRelease { key_code: u16 },
+    MouseMove { x: i32, y: i32 },
+    MouseButton { button: u8, pressed: bool },
+    MouseScroll { dx: i32, dy: i32 },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Message {
     InputEvent(InputEvent),
+    InputEventTyped(InputEventType),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
