@@ -1,12 +1,15 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InputEvent {
+    pub event_type: String,
+    pub code: u16,
+    pub value: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Message {
-    InputEvent {
-        event_type: String,
-        code: u16,
-        value: i32,
-    },
+    InputEvent(InputEvent),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,10 +32,10 @@ impl Packet {
     }
 
     pub fn input_event(event_type: String, code: u16, value: i32) -> Self {
-        Self::new(Message::InputEvent {
+        Self::new(Message::InputEvent(InputEvent {
             event_type,
             code,
             value,
-        })
+        }))
     }
 }
