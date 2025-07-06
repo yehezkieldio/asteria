@@ -30,9 +30,11 @@ jobs:
           - platform: "ubuntu-22.04"
             target: "x86_64-unknown-linux-gnu"
             ext: ""
+            package_constraint: "asteria-client"
           - platform: "windows-latest"
             target: "x86_64-pc-windows-msvc"
             ext: ".exe"
+            package_constraint: "asteria-server"
     runs-on: ${{ matrix.platform }}
     steps:
       - name: Checkout
@@ -54,16 +56,33 @@ jobs:
         id: pkg
         shell: bash
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ github.event.inputs.package }}" != "all" ]]; then
-            echo "selected_package=${{ github.event.inputs.package }}" >> $GITHUB_OUTPUT
-          else
-            # Extract from tag e.g. asteria-server-v1.2.3 → asteria-server
+          selected_pkg="${{ github.event.inputs.package }}"
+          tag_pkg=""
+
+          if [[ "${{ github.event_name }}" == "push" ]]; then
             tag="${GITHUB_REF#refs/tags/}"
             if [[ "$tag" =~ ^(asteria-[a-z]+)-v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
-              echo "selected_package=${BASH_REMATCH[1]}" >> $GITHUB_OUTPUT
-            else
-              echo "selected_package=all" >> $GITHUB_OUTPUT
+              tag_pkg="${BASH_REMATCH[1]}"
             fi
+          fi
+
+          final_pkg=""
+
+          # Logic for workflow_dispatch input or tag
+          if [[ "$selected_pkg" != "all" ]]; then
+            final_pkg="$selected_pkg"
+          elif [[ -n "$tag_pkg" ]]; then
+            final_pkg="$tag_pkg"
+          else
+            final_pkg="${{ matrix.package_constraint }}" # Default to the platform's constrained package
+          fi
+
+          # Ensure the selected package matches the platform's constraint
+          if [[ "$final_pkg" != "${{ matrix.package_constraint }}" && "$final_pkg" != "all" ]]; then
+            echo "Skipping build for package '$final_pkg' on platform '${{ matrix.platform }}' as it's not constrained to '${{ matrix.package_constraint }}'."
+            echo "selected_package=skip" >> $GITHUB_OUTPUT
+          else
+            echo "selected_package=$final_pkg" >> $GITHUB_OUTPUT
           fi
 
       - name: Build Release
@@ -72,19 +91,25 @@ jobs:
           mkdir -p release
           pkg="${{ steps.pkg.outputs.selected_package }}"
 
-          if [[ "$pkg" == "all" ]]; then
-            cargo build --release --target ${{ matrix.target }}
-            cp target/${{ matrix.target }}/release/asteria-* release/
-          else
-            cargo build --release --package "$pkg" --target ${{ matrix.target }}
-            bin_name=$(echo "$pkg" | sed 's/^asteria-//')
+          # If the package is 'all' (meaning no specific package was requested via workflow_dispatch
+          # or tag, so we build the platform's constrained package), or if the package
+          # matches the constraint.
+          if [[ "$pkg" == "all" || "$pkg" == "${{ matrix.package_constraint }}" ]]; then
+            # Determine the actual package name for cargo build
+            build_pkg_name="${{ matrix.package_constraint }}"
+
+            cargo build --release --package "$build_pkg_name" --target ${{ matrix.target }}
+            bin_name=$(echo "$build_pkg_name" | sed 's/^asteria-//')
             cp target/${{ matrix.target }}/release/$bin_name${{ matrix.ext }} release/${bin_name}-${{ matrix.platform }}${{ matrix.ext }}
+          else
+            echo "No build performed for $pkg on ${{ matrix.platform }}."
           fi
 
       - name: Upload Artifacts
+        if: success() && steps.pkg.outputs.selected_package != 'skip' # Only upload if build was attempted and succeeded
         uses: actions/upload-artifact@v4
         with:
-          name: asteria-${{ matrix.platform }}
+          name: asteria-${{ matrix.package_constraint }}-${{ matrix.platform }}
           path: release/*
 
   create-release:
