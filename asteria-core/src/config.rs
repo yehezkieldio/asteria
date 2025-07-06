@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -6,7 +6,10 @@ use serde::{Deserialize, Serialize};
 pub trait LoadableConfig: Sized + Default + for<'de> Deserialize<'de> {
     fn file_name() -> &'static str;
 
-    fn load() -> Result<Self> {
+    fn load() -> Result<Self>
+    where
+        Self: Serialize,
+    {
         let config_path = Self::config_path()?;
 
         if config_path.exists() {
@@ -14,8 +17,24 @@ pub trait LoadableConfig: Sized + Default + for<'de> Deserialize<'de> {
             let config: Self = toml::from_str(&content)?;
             Ok(config)
         } else {
-            Ok(Self::default())
+            let default_config = Self::default();
+            default_config.save()?;
+            Ok(default_config)
         }
+    }
+
+    fn save(&self) -> Result<()>
+    where
+        Self: Serialize,
+    {
+        let config_path = Self::config_path()?;
+        if let Some(parent) = config_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let content = toml::to_string_pretty(self)?;
+        fs::write(&config_path, content)?;
+        Ok(())
     }
 
     fn config_path() -> Result<PathBuf> {

@@ -2,7 +2,7 @@ mod input;
 mod network;
 
 use anyhow::{Ok, Result};
-use asteria_core::init_logging;
+use asteria_core::{ClientConfig, LoadableConfig, init_logging};
 use clap::{Arg, ArgMatches, Command};
 use tracing::{error, info};
 
@@ -18,6 +18,9 @@ async fn main() -> Result<()> {
     match matches.subcommand() {
         Some(("start", _)) => {
             info!("Starting Asteria client...");
+
+            ClientConfig::load()?;
+            info!("Client configuration loaded successfully");
 
             // Create network client and input capture
             let network_client = NetworkClient::new()?;
