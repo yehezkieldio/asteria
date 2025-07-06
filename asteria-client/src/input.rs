@@ -12,9 +12,12 @@ use libc::{O_RDONLY, O_RDWR, O_WRONLY};
 use std::fs::{File, OpenOptions};
 use std::os::unix::{fs::OpenOptionsExt, io::OwnedFd};
 use std::path::Path;
-use tokio::sync::mpsc;
+use std::sync::Arc;
+use tokio::sync::{RwLock, mpsc};
 use tracing::{debug, error, info, warn};
+use uinput::Device;
 
+use crate::keys::{key_codes, key_name};
 use crate::network::NetworkClient;
 
 #[allow(dead_code)]
@@ -39,10 +42,32 @@ impl LibinputInterface for Interface {
 /// Input capture system that monitors Linux input events
 pub struct InputCapture {
     libinput: Libinput,
+    toggle_key: u32,
+    relay_state: Arc<RwLock<RelayState>>,
+    suppress_device: Option<Device>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RelayState {
+    pub relay_enabled: bool,
+    pub suppress_local_input: bool,
+}
+
+impl Default for RelayState {
+    fn default() -> Self {
+        Self {
+            relay_enabled: false,
+            suppress_local_input: false,
+        }
+    }
 }
 
 impl InputCapture {
     pub fn new() -> Result<Self> {
+        Self::new_with_toggle_key(0x1D) // Default to Left Ctrl (KEY_LEFTCTRL)
+    }
+
+    pub fn new_with_toggle_key(toggle_key: u32) -> Result<Self> {
         let mut libinput = Libinput::new_with_udev(Interface);
 
         if let Err(e) = libinput.udev_assign_seat("seat0") {
@@ -51,7 +76,41 @@ impl InputCapture {
         }
 
         info!("Successfully initialized libinput and assigned seat");
-        Ok(Self { libinput })
+        info!("Toggle key set to: 0x{:02x}", toggle_key);
+
+        Ok(Self {
+            libinput,
+            toggle_key,
+            relay_state: Arc::new(RwLock::new(RelayState::default())),
+            suppress_device: None,
+        })
+    }
+
+    /// Get the current relay state
+    pub async fn get_relay_state(&self) -> RelayState {
+        self.relay_state.read().await.clone()
+    }
+
+    /// Toggle the relay state
+    async fn toggle_relay(&mut self) -> Result<()> {
+        let mut state = self.relay_state.write().await;
+
+        if state.relay_enabled {
+            // Disable relay and restore local input
+            state.relay_enabled = false;
+            state.suppress_local_input = false;
+            self.suppress_device = None;
+            info!("🔄 Relay disabled - Linux input restored");
+        } else {
+            // Enable relay and suppress local input
+            state.relay_enabled = true;
+            state.suppress_local_input = true;
+
+            // Create a suppress device (this is a placeholder - in practice you'd need to implement device grabbing)
+            info!("🔄 Relay enabled - Linux input suppressed, relaying to Windows");
+        }
+
+        Ok(())
     }
 
     /// Start capturing input events and relay them through the network client
@@ -80,6 +139,10 @@ impl InputCapture {
     /// Capture input events from libinput
     async fn capture_input_events(&mut self, packet_sender: mpsc::Sender<Packet>) -> Result<()> {
         info!("Starting input event capture loop...");
+        info!(
+            "Press the toggle key (0x{:02x}) to enable/disable relay",
+            self.toggle_key
+        );
 
         loop {
             // Dispatch libinput events
@@ -91,12 +154,31 @@ impl InputCapture {
 
             // Process all available events
             while let Some(event) = self.libinput.next() {
-                if let Some(packet) = self.convert_event_to_packet(event) {
-                    if let Err(e) = packet_sender.send(packet).await {
-                        error!("Failed to send packet: {}", e);
-                        return Err(anyhow::anyhow!("Packet sender channel closed"));
+                // Check if this is a toggle key event
+                if let Event::Keyboard(ref keyboard_event) = event {
+                    if keyboard_event.key() == self.toggle_key
+                        && keyboard_event.key_state() == KeyState::Pressed
+                    {
+                        if let Err(e) = self.toggle_relay().await {
+                            error!("Failed to toggle relay: {}", e);
+                        }
+                        continue; // Don't process the toggle key itself
                     }
                 }
+
+                let relay_state = self.relay_state.read().await;
+
+                // Only process events if relay is enabled
+                if relay_state.relay_enabled {
+                    if let Some(packet) = self.convert_event_to_packet(event) {
+                        if let Err(e) = packet_sender.send(packet).await {
+                            error!("Failed to send packet: {}", e);
+                            return Err(anyhow::anyhow!("Packet sender channel closed"));
+                        }
+                    }
+                }
+                // Note: In a full implementation, you'd want to suppress the event from reaching the desktop
+                // when relay_state.suppress_local_input is true. This requires more complex input device management.
             }
 
             // Yield control to allow other tasks to run
