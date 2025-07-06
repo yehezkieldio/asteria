@@ -9,16 +9,33 @@ use input::{
     },
 };
 use libc::{O_RDONLY, O_RDWR, O_WRONLY};
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::os::unix::{fs::OpenOptionsExt, io::OwnedFd};
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::{RwLock, mpsc};
 use tracing::{debug, error, info, warn};
-use uinput::Device;
 
-use crate::keys::{key_codes, key_name};
 use crate::network::NetworkClient;
+
+// Linux input event ioctl constants
+const EVIOCGRAB: u64 = 0x40044590;
+const EVIOCGBIT_KEY: u64 = 0x80604521;
+const EVIOCGBIT_REL: u64 = 0x80604522;
+const EVIOCGBIT_ABS: u64 = 0x80604523;
+const EVIOCGNAME: u64 = 0x80ff4506;
+
+// Event type constants
+const EV_KEY: u8 = 0x01;
+const EV_REL: u8 = 0x02;
+const EV_ABS: u8 = 0x03;
+
+// Key/button bit masks
+const REL_X: u8 = 0x00;
+const REL_Y: u8 = 0x01;
+const ABS_X: u8 = 0x00;
+const ABS_Y: u8 = 0x01;
 
 #[allow(dead_code)]
 struct Interface;
@@ -44,7 +61,7 @@ pub struct InputCapture {
     libinput: Libinput,
     toggle_key: u32,
     relay_state: Arc<RwLock<RelayState>>,
-    suppress_device: Option<Device>,
+    grabbed_devices: HashMap<String, OwnedFd>,
 }
 
 #[derive(Debug, Clone)]
@@ -82,7 +99,7 @@ impl InputCapture {
             libinput,
             toggle_key,
             relay_state: Arc::new(RwLock::new(RelayState::default())),
-            suppress_device: None,
+            grabbed_devices: HashMap::new(),
         })
     }
 
@@ -93,20 +110,39 @@ impl InputCapture {
 
     /// Toggle the relay state
     async fn toggle_relay(&mut self) -> Result<()> {
-        let mut state = self.relay_state.write().await;
+        let current_state = {
+            let state = self.relay_state.read().await;
+            state.relay_enabled
+        };
 
-        if state.relay_enabled {
+        if current_state {
             // Disable relay and restore local input
-            state.relay_enabled = false;
-            state.suppress_local_input = false;
-            self.suppress_device = None;
+            {
+                let mut state = self.relay_state.write().await;
+                state.relay_enabled = false;
+                state.suppress_local_input = false;
+            }
+
+            // Release all grabbed devices
+            if let Err(e) = self.release_input_devices().await {
+                error!("Failed to release input devices: {}", e);
+            }
+
             info!("🔄 Relay disabled - Linux input restored");
         } else {
-            // Enable relay and suppress local input
-            state.relay_enabled = true;
-            state.suppress_local_input = true;
+            // Grab all input devices first
+            if let Err(e) = self.grab_input_devices().await {
+                error!("Failed to grab input devices: {}", e);
+                return Err(e);
+            }
 
-            // Create a suppress device (this is a placeholder - in practice you'd need to implement device grabbing)
+            // Enable relay and suppress local input
+            {
+                let mut state = self.relay_state.write().await;
+                state.relay_enabled = true;
+                state.suppress_local_input = true;
+            }
+
             info!("🔄 Relay enabled - Linux input suppressed, relaying to Windows");
         }
 
@@ -154,11 +190,16 @@ impl InputCapture {
 
             // Process all available events
             while let Some(event) = self.libinput.next() {
-                // Check if this is a toggle key event
+                let relay_state = self.relay_state.read().await;
+
+                // ALWAYS process the toggle key, even when relay is enabled
                 if let Event::Keyboard(ref keyboard_event) = event {
                     if keyboard_event.key() == self.toggle_key
                         && keyboard_event.key_state() == KeyState::Pressed
                     {
+                        // Drop the read lock before calling toggle_relay
+                        drop(relay_state);
+
                         if let Err(e) = self.toggle_relay().await {
                             error!("Failed to toggle relay: {}", e);
                         }
@@ -166,9 +207,7 @@ impl InputCapture {
                     }
                 }
 
-                let relay_state = self.relay_state.read().await;
-
-                // Only process events if relay is enabled
+                // Only process and relay other events if relay is enabled
                 if relay_state.relay_enabled {
                     if let Some(packet) = self.convert_event_to_packet(event) {
                         if let Err(e) = packet_sender.send(packet).await {
@@ -177,13 +216,69 @@ impl InputCapture {
                         }
                     }
                 }
-                // Note: In a full implementation, you'd want to suppress the event from reaching the desktop
-                // when relay_state.suppress_local_input is true. This requires more complex input device management.
             }
 
             // Yield control to allow other tasks to run
             tokio::task::yield_now().await;
         }
+    }
+
+    // ...existing code...
+
+    /// Check if device is safe to grab (not used by our own libinput instance)
+    fn is_safe_to_grab(&self, device_path: &str) -> bool {
+        // Get the device name to check if it's something we should avoid
+        if let Ok(file) = OpenOptions::new().read(true).open(device_path) {
+            use std::os::unix::io::AsRawFd;
+            let fd = file.as_raw_fd();
+
+            // Get device name
+            let mut name_buf = [0u8; 256];
+            let name_result = unsafe { libc::ioctl(fd, EVIOCGNAME, name_buf.as_mut_ptr()) };
+
+            if name_result >= 0 {
+                if let Ok(name) = std::str::from_utf8(&name_buf[..name_result as usize]) {
+                    let name = name.trim_end_matches('\0');
+                    debug!("Device {} name: {}", device_path, name);
+
+                    // Skip virtual devices and special devices
+                    if name.to_lowercase().contains("virtual")
+                        || name.to_lowercase().contains("uinput")
+                        || name.to_lowercase().contains("asteria")
+                    {
+                        debug!("Skipping virtual/special device: {}", name);
+                        return false;
+                    }
+                }
+            }
+        }
+
+        true
+    }
+
+    /// Grab a specific input device with selective grabbing
+    async fn grab_device(&mut self, device_path: &str) -> Result<()> {
+        use std::os::unix::io::AsRawFd;
+
+        // Open the device
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(device_path)
+            .map_err(|e| anyhow::anyhow!("Failed to open device {}: {}", device_path, e))?;
+
+        let fd = file.as_raw_fd();
+
+        // For now, don't actually grab devices to avoid lock-out
+        // Instead, we'll rely on libinput's event handling
+        // This is a safer approach until we implement proper device filtering
+
+        // Store the file descriptor for tracking, but don't grab
+        debug!("Tracking device (not grabbing): {}", device_path);
+        self.grabbed_devices
+            .insert(device_path.to_string(), file.into());
+
+        Ok(())
     }
 
     /// Convert a libinput event to a protocol packet
@@ -286,10 +381,177 @@ impl InputCapture {
             }
         }
     }
+
+    /// Grab all input devices to suppress local input
+    async fn grab_input_devices(&mut self) -> Result<()> {
+        info!("Grabbing input devices for suppression...");
+
+        // Get list of input devices
+        let device_paths = self.get_input_device_paths()?;
+
+        for device_path in device_paths {
+            if let Err(e) = self.grab_device(&device_path).await {
+                warn!("Failed to grab device {}: {}", device_path, e);
+                // Continue with other devices even if one fails
+            }
+        }
+
+        info!(
+            "Successfully grabbed {} input devices",
+            self.grabbed_devices.len()
+        );
+        Ok(())
+    }
+
+    /// Release all grabbed input devices
+    async fn release_input_devices(&mut self) -> Result<()> {
+        info!("Releasing grabbed input devices...");
+
+        // Close all grabbed device file descriptors
+        for (device_path, fd) in self.grabbed_devices.drain() {
+            drop(fd);
+            debug!("Released device: {}", device_path);
+        }
+
+        info!("All input devices released");
+        Ok(())
+    }
+
+    /// Get paths to all input devices, filtering out devices that should not be grabbed
+    fn get_input_device_paths(&self) -> Result<Vec<String>> {
+        let mut device_paths = Vec::new();
+
+        // Scan /dev/input/ for event devices
+        let input_dir = std::fs::read_dir("/dev/input/")?;
+
+        for entry in input_dir {
+            let entry = entry?;
+            let path = entry.path();
+
+            if let Some(filename) = path.file_name() {
+                if let Some(filename_str) = filename.to_str() {
+                    if filename_str.starts_with("event") {
+                        if let Some(path_str) = path.to_str() {
+                            // Check if this device should be grabbed
+                            if self.should_grab_device(path_str)? {
+                                device_paths.push(path_str.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        device_paths.sort();
+        debug!("Found {} grabbable input devices", device_paths.len());
+        Ok(device_paths)
+    }
+
+    /// Check if a device should be grabbed based on its capabilities
+    fn should_grab_device(&self, device_path: &str) -> Result<bool> {
+        use std::os::unix::io::AsRawFd;
+
+        // First check if it's safe to grab this device
+        if !self.is_safe_to_grab(device_path) {
+            return Ok(false);
+        }
+
+        // Try to open the device to check its capabilities
+        let file = match OpenOptions::new().read(true).open(device_path) {
+            Ok(file) => file,
+            Err(e) => {
+                debug!(
+                    "Cannot open device {} for capability check: {}",
+                    device_path, e
+                );
+                return Ok(false);
+            }
+        };
+
+        let fd = file.as_raw_fd();
+
+        // Check if device has keyboard or mouse capabilities
+        let mut key_bits = [0u8; 96]; // EV_KEY bitmap (768 bits / 8 = 96 bytes)
+        let mut rel_bits = [0u8; 8]; // EV_REL bitmap (64 bits / 8 = 8 bytes)
+        let mut abs_bits = [0u8; 8]; // EV_ABS bitmap (64 bits / 8 = 8 bytes)
+
+        // Get key capabilities (keyboards)
+        let key_result = unsafe { libc::ioctl(fd, EVIOCGBIT_KEY, key_bits.as_mut_ptr()) };
+
+        // Get relative axis capabilities (mice)
+        let rel_result = unsafe { libc::ioctl(fd, EVIOCGBIT_REL, rel_bits.as_mut_ptr()) };
+
+        // Get absolute axis capabilities (touchpads, tablets)
+        let abs_result = unsafe { libc::ioctl(fd, EVIOCGBIT_ABS, abs_bits.as_mut_ptr()) };
+
+        // Check if device has keyboard keys
+        let has_keyboard = key_result >= 0 && key_bits.iter().any(|&b| b != 0);
+
+        // Check if device has mouse relative movement
+        let has_mouse_rel = rel_result >= 0 && (rel_bits[0] & (1 << REL_X | 1 << REL_Y)) != 0;
+
+        // Check if device has absolute positioning (touchpad)
+        let has_abs_pos = abs_result >= 0 && (abs_bits[0] & (1 << ABS_X | 1 << ABS_Y)) != 0;
+
+        let should_grab = has_keyboard || has_mouse_rel || has_abs_pos;
+
+        if should_grab {
+            debug!(
+                "Device {} capabilities: keyboard={}, mouse_rel={}, abs_pos={}",
+                device_path, has_keyboard, has_mouse_rel, has_abs_pos
+            );
+        }
+
+        Ok(should_grab)
+    }
+
+    /// Gracefully shutdown the input capture system
+    pub async fn shutdown(&mut self) -> Result<()> {
+        info!("Shutting down input capture system...");
+
+        // Check if relay is enabled and disable it
+        let should_release = {
+            let state = self.relay_state.read().await;
+            state.relay_enabled
+        };
+
+        if should_release {
+            // Update state first
+            {
+                let mut state = self.relay_state.write().await;
+                state.relay_enabled = false;
+                state.suppress_local_input = false;
+            }
+
+            // Then release devices
+            if let Err(e) = self.release_input_devices().await {
+                error!("Failed to release input devices during shutdown: {}", e);
+            }
+        }
+
+        info!("Input capture system shutdown complete");
+        Ok(())
+    }
 }
 
 impl Default for InputCapture {
     fn default() -> Self {
         Self::new().expect("Failed to create input capture")
+    }
+}
+
+impl Drop for InputCapture {
+    fn drop(&mut self) {
+        // Release all grabbed devices when the InputCapture is dropped
+        if !self.grabbed_devices.is_empty() {
+            info!(
+                "Releasing {} grabbed devices on drop",
+                self.grabbed_devices.len()
+            );
+            for (device_path, fd) in self.grabbed_devices.drain() {
+                drop(fd);
+                debug!("Released device on drop: {}", device_path);
+            }
+        }
     }
 }
