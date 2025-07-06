@@ -1,25 +1,11 @@
-use crate::{ClientConfig, LoadableConfig, NetworkConfig, ServerConfig};
+use tracing_subscriber::fmt;
 
-pub trait HasNetworkConfig {
-    fn network(&self) -> &NetworkConfig;
-}
+pub fn init_logging() {
+    let subscriber: fmt::SubscriberBuilder = fmt()
+        .with_target(false)
+        .with_thread_ids(false)
+        .with_file(false)
+        .with_line_number(false);
 
-impl HasNetworkConfig for ServerConfig {
-    fn network(&self) -> &NetworkConfig {
-        &self.network
-    }
-}
-
-impl HasNetworkConfig for ClientConfig {
-    fn network(&self) -> &NetworkConfig {
-        &self.network
-    }
-}
-
-pub fn init_logging<C>(config: &C)
-where
-    C: LoadableConfig + HasNetworkConfig,
-{
-    let network = config.network();
-    println!("Initializing logging for {}:{}", network.host, network.port);
+    subscriber.init();
 }
