@@ -27,7 +27,7 @@ impl NetworkClient {
 
     /// Connect to the server
     pub async fn connect(&mut self) -> Result<()> {
-        let address = format!("{}:{}", self.config.network.host, self.config.network.port);
+        let address = format!("{}:{}", "192.168.137.1", self.config.network.port);
         info!("Connecting to server at {}", address);
 
         let stream = TcpStream::connect(&address).await?;
