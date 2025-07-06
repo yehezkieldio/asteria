@@ -96,16 +96,27 @@ jobs:
           if [[ "$version" =~ ^v?([0-9]+\.[0-9]+\.[0-9]+) ]]; then
             version="${BASH_REMATCH[1]}"
           else
-            # Fallback: parse version from Cargo.toml
-            version=$(grep '^version =' "crates/${{ matrix.package_constraint }}/Cargo.toml" | head -n1 | cut -d '"' -f2)
+            # Fallback: parse version from Cargo.toml - fix path
+            version=$(grep '^version =' "${{ matrix.package_constraint }}/Cargo.toml" | head -n1 | cut -d '"' -f2)
           fi
 
           if [[ "$pkg" == "all" || "$pkg" == "${{ matrix.package_constraint }}" ]]; then
             build_pkg_name="${{ matrix.package_constraint }}"
             cargo build --release --package "$build_pkg_name" --target ${{ matrix.target }}
-            bin_name=$(echo "$build_pkg_name" | sed 's/^asteria-//')
+
+            # Extract binary name more reliably
+            bin_name="${build_pkg_name#asteria-}"
+
+            # Use shorter platform identifiers
+            platform_name=""
+            case "${{ matrix.platform }}" in
+              "ubuntu-22.04") platform_name="linux" ;;
+              "windows-latest") platform_name="windows" ;;
+              *) platform_name="${{ matrix.platform }}" ;;
+            esac
+
             cp target/${{ matrix.target }}/release/$bin_name${{ matrix.ext }} \
-              release/${bin_name}-${version}-${{ matrix.platform }}${{ matrix.ext }}
+              release/${bin_name}-${version}-${platform_name}${{ matrix.ext }}
           else
             echo "No build performed for $pkg on ${{ matrix.platform }}."
           fi
@@ -114,7 +125,7 @@ jobs:
         if: success() && steps.pkg.outputs.selected_package != 'skip'
         uses: actions/upload-artifact@v4
         with:
-          name: asteria-${{ matrix.package_constraint }}-${{ matrix.platform }}-${{ github.ref_name }}
+          name: asteria-${{ matrix.package_constraint }}-${{ matrix.target }}-${{ github.ref_name }}
           path: release/*
 
   create-release:
