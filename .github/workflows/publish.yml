@@ -61,20 +61,35 @@ jobs:
 
           if [[ "${{ github.event_name }}" == "push" ]]; then
             tag="${GITHUB_REF#refs/tags/}"
-            if [[ "$tag" =~ ^(asteria-[a-z]+)-v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            echo "Processing tag: $tag"
+
+            # Handle specific package tags like asteria-server-v1.2.0
+            if [[ "$tag" =~ ^(asteria-[a-z]+)-v([0-9]+\.[0-9]+\.[0-9]+)(-rc[0-9]+)?$ ]]; then
               tag_pkg="${BASH_REMATCH[1]}"
+              tag_version="${BASH_REMATCH[2]}"
+              echo "Found package-specific tag: $tag_pkg version $tag_version"
+            # Handle general version tags like v1.2.0
+            elif [[ "$tag" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)(-rc[0-9]+)?$ ]]; then
+              tag_pkg="all"
+              tag_version="${BASH_REMATCH[1]}"
+              echo "Found general version tag: $tag_version"
+            else
+              echo "Warning: Tag format not recognized: $tag"
             fi
           fi
 
           final_pkg=""
 
           # Logic for workflow_dispatch input or tag
-          if [[ "$selected_pkg" != "all" ]]; then
+          if [[ "$selected_pkg" != "all" && -n "$selected_pkg" ]]; then
             final_pkg="$selected_pkg"
+            echo "Using manual selection: $final_pkg"
           elif [[ -n "$tag_pkg" ]]; then
             final_pkg="$tag_pkg"
+            echo "Using tag-derived package: $final_pkg"
           else
             final_pkg="${{ matrix.package_constraint }}" # Default to the platform's constrained package
+            echo "Using platform constraint: $final_pkg"
           fi
 
           # Ensure the selected package matches the platform's constraint
@@ -85,23 +100,37 @@ jobs:
             echo "selected_package=$final_pkg" >> $GITHUB_OUTPUT
           fi
 
+          # Also output the version for later use
+          if [[ -n "$tag_version" ]]; then
+            echo "build_version=$tag_version" >> $GITHUB_OUTPUT
+          fi
+
       - name: Build Release
+        if: steps.pkg.outputs.selected_package != 'skip'
         shell: bash
         run: |
           mkdir -p release
           pkg="${{ steps.pkg.outputs.selected_package }}"
 
-          # Extract version from Cargo.toml or from the tag if available
-          version="${{ github.ref_name }}"
-          if [[ "$version" =~ ^v?([0-9]+\.[0-9]+\.[0-9]+) ]]; then
-            version="${BASH_REMATCH[1]}"
-          else
-            # Fallback: parse version from Cargo.toml - fix path
-            version=$(grep '^version =' "${{ matrix.package_constraint }}/Cargo.toml" | head -n1 | cut -d '"' -f2)
+          # Extract version from tag or fallback to Cargo.toml
+          version="${{ steps.pkg.outputs.build_version }}"
+          if [[ -z "$version" ]]; then
+            # Fallback: parse version from tag name
+            tag_name="${{ github.ref_name }}"
+            if [[ "$tag_name" =~ v?([0-9]+\.[0-9]+\.[0-9]+) ]]; then
+              version="${BASH_REMATCH[1]}"
+            else
+              # Final fallback: parse version from Cargo.toml
+              version=$(grep '^version =' "${{ matrix.package_constraint }}/Cargo.toml" | head -n1 | cut -d '"' -f2)
+            fi
           fi
+
+          echo "Building version: $version"
 
           if [[ "$pkg" == "all" || "$pkg" == "${{ matrix.package_constraint }}" ]]; then
             build_pkg_name="${{ matrix.package_constraint }}"
+            echo "Building package: $build_pkg_name"
+
             cargo build --release --package "$build_pkg_name" --target ${{ matrix.target }}
 
             # Use the full package name as the binary name
@@ -115,8 +144,11 @@ jobs:
               *) platform_name="${{ matrix.platform }}" ;;
             esac
 
+            output_name="${bin_name}-${version}-${platform_name}${{ matrix.ext }}"
+            echo "Creating binary: $output_name"
+
             cp target/${{ matrix.target }}/release/$bin_name${{ matrix.ext }} \
-              release/${bin_name}-${version}-${platform_name}${{ matrix.ext }}
+              release/$output_name
           else
             echo "No build performed for $pkg on ${{ matrix.platform }}."
           fi
