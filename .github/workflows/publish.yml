@@ -91,25 +91,30 @@ jobs:
           mkdir -p release
           pkg="${{ steps.pkg.outputs.selected_package }}"
 
-          # If the package is 'all' (meaning no specific package was requested via workflow_dispatch
-          # or tag, so we build the platform's constrained package), or if the package
-          # matches the constraint.
-          if [[ "$pkg" == "all" || "$pkg" == "${{ matrix.package_constraint }}" ]]; then
-            # Determine the actual package name for cargo build
-            build_pkg_name="${{ matrix.package_constraint }}"
+          # Extract version from Cargo.toml or from the tag if available
+          version="${{ github.ref_name }}"
+          if [[ "$version" =~ ^v?([0-9]+\.[0-9]+\.[0-9]+) ]]; then
+            version="${BASH_REMATCH[1]}"
+          else
+            # Fallback: parse version from Cargo.toml
+            version=$(grep '^version =' "crates/${{ matrix.package_constraint }}/Cargo.toml" | head -n1 | cut -d '"' -f2)
+          fi
 
+          if [[ "$pkg" == "all" || "$pkg" == "${{ matrix.package_constraint }}" ]]; then
+            build_pkg_name="${{ matrix.package_constraint }}"
             cargo build --release --package "$build_pkg_name" --target ${{ matrix.target }}
             bin_name=$(echo "$build_pkg_name" | sed 's/^asteria-//')
-            cp target/${{ matrix.target }}/release/$bin_name${{ matrix.ext }} release/${bin_name}-${{ matrix.platform }}${{ matrix.ext }}
+            cp target/${{ matrix.target }}/release/$bin_name${{ matrix.ext }} \
+              release/${bin_name}-${version}-${{ matrix.platform }}${{ matrix.ext }}
           else
             echo "No build performed for $pkg on ${{ matrix.platform }}."
           fi
 
       - name: Upload Artifacts
-        if: success() && steps.pkg.outputs.selected_package != 'skip' # Only upload if build was attempted and succeeded
+        if: success() && steps.pkg.outputs.selected_package != 'skip'
         uses: actions/upload-artifact@v4
         with:
-          name: asteria-${{ matrix.package_constraint }}-${{ matrix.platform }}
+          name: asteria-${{ matrix.package_constraint }}-${{ matrix.platform }}-${{ github.ref_name }}
           path: release/*
 
   create-release:
